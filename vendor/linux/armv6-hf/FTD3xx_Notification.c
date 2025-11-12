@@ -19,9 +19,12 @@
 #include <ctype.h>
 #include <assert.h>
 #include <limits.h>
+#include <errno.h>
+#include <sys/time.h>
+#include <pthread.h>
 #include "ftd3xx.h"
-#include "event_handle_async.hpp"
-
+#include "event_handle_async.h"
+#define EVENT_SIGNATURE 0x45564E54 // ASCII hex for EVNT sequence
 #include <unistd.h> // for usleep
 #include <errno.h> // ETIMEDOUT
 #include <sys/time.h> // gettimeofday
@@ -36,7 +39,7 @@ static char         message[BYTES_WRITE] = "FTDI-CHIP";
 static UCHAR        receiveBuffer[BYTES_WRITE];
 static ULONG        totalBytesRead = 0;
 static ULONG        bytesWritten = 0;
-
+FT_HANDLE           gftHandle;
 /*Functions */
 static const char * statusString (FT_STATUS status)
 {
@@ -64,16 +67,10 @@ static const char * statusString (FT_STATUS status)
             return "DEVICE_NOT_OPENED_FOR_WRITE";
         case FT_FAILED_TO_WRITE_DEVICE:
             return "FAILED_TO_WRITE_DEVICE";
-        case FT_EEPROM_READ_FAILED:
-            return "EEPROM_READ_FAILED";
-        case FT_EEPROM_WRITE_FAILED:
-            return "EEPROM_WRITE_FAILED";
-        case FT_EEPROM_ERASE_FAILED:
-            return "EEPROM_ERASE_FAILED";
-        case FT_EEPROM_NOT_PRESENT:
-            return "EEPROM_NOT_PRESENT";
-        case FT_EEPROM_NOT_PROGRAMMED:
-            return "EEPROM_NOT_PROGRAMMED";
+        case FT_MEM_INSUFFICIENT_ERROR:
+            return "MEM_INSUFFICIENT_ERROR";
+        case FT_OVERFLOW_ERROR:
+            return "OVERFLOW_ERROR";
         case FT_INVALID_ARGS:
             return "INVALID_ARGS";
         case FT_NOT_SUPPORTED:
@@ -145,8 +142,8 @@ static FT_STATUS enableNotifications()
     FT_STATUS                    ftStatus;
     FT_HANDLE                    ftHandle;
     FT_60XCONFIGURATION          chipConfig;
-
-    ftStatus = FT_Create(0,FT_OPEN_BY_INDEX, &ftHandle);
+    printf("%s:%d: ................Start\n",__FUNCTION__,__LINE__);
+    ftStatus = FT_Create((PVOID)"FTDI SuperSpeed-FIFO Bridge", FT_OPEN_BY_DESCRIPTION, &ftHandle);
     if (FT_FAILED(ftStatus))
     {
         printf("%s:%d: ERROR: FT_Create failed (%s)\n",__FILE__,__LINE__,statusString(ftStatus));
@@ -169,14 +166,14 @@ static FT_STATUS enableNotifications()
     {
         FT_Close(ftHandle);
         printf("%s:%d: ERROR: FT_SetChipConfiguration failed (%s)\n",__FILE__,__LINE__, statusString(ftStatus));
-        sleep(100);
+        //sleep(1);
         return ftStatus;
     }
 
     FT_Close(ftHandle);
 
-    sleep(10);
-
+    sleep(1);
+    printf("%s:%d: ................END\n",__FUNCTION__,__LINE__);
     return FT_OK;
 }
 
@@ -185,8 +182,8 @@ static FT_STATUS DisableNotifications()
     FT_HANDLE                    ftHandle;
     FT_STATUS                    ftStatus;
     FT_60XCONFIGURATION          chipConfig;
-
-    ftStatus = FT_Create(0,FT_OPEN_BY_INDEX, &ftHandle);
+    printf("%s:%d: ................Start\n",__FUNCTION__,__LINE__);
+    ftStatus = FT_Create((PVOID)"FTDI SuperSpeed-FIFO Bridge", FT_OPEN_BY_DESCRIPTION, &ftHandle);
     if (FT_FAILED(ftStatus))
     {
         printf("%s:%d: ERROR: FT_Create failed (%s)\n",__FILE__,__LINE__,statusString(ftStatus));
@@ -214,8 +211,8 @@ static FT_STATUS DisableNotifications()
 
     FT_Close(ftHandle);
     ftHandle = NULL;
-
-    sleep(5);
+    printf("%s:%d: ................END\n",__FUNCTION__,__LINE__);
+    //sleep(1);
   
     return FT_OK;
 }
@@ -230,12 +227,17 @@ static FT_STATUS DisableNotifications()
  * @param cbType     subject of notification: unread data or GPIO.
  * @param cbInfo     information about the unread data (or GPIO event).
  */
-static VOID notificationCb(void *cbContext, E_FT_NOTIFICATION_CALLBACK_TYPE  cbType,void *cbInfo)
+
+static VOID notificationCb(void *cbContext, E_FT_NOTIFICATION_CALLBACK_TYPE cbType, void *cbInfo)
 {
     MyNotification *notification = cbContext;
-    ULONG           bytesRead = 0;
     FT_STATUS       ftStatus = FT_OK;
-    printf("%s:%d: %s\n",__FILE__,__LINE__,__func__);
+    printf("%s:%d: ................Start\n",__FUNCTION__,__LINE__);
+    if (!notification || !notification->event)
+    {
+        printf("%s:%d: Invalid callback context or event.\n", __FILE__, __LINE__);
+        return;
+    }
     if (cbType == E_FT_NOTIFICATION_CALLBACK_TYPE_DATA)
     {
         // There is unread data at one of the endpoints.
@@ -245,6 +247,7 @@ static VOID notificationCb(void *cbContext, E_FT_NOTIFICATION_CALLBACK_TYPE  cbT
         
         notification->endpoint = (unsigned int)info->ucEndpointNo;
         notification->bytesToRead = (int)info->ulRecvNotificationLength;
+
 
         // Tell app thread to read data.  FIXME: need queue here?
         (void)FT_W32_SetEvent(notification->event);
@@ -257,26 +260,30 @@ static VOID notificationCb(void *cbContext, E_FT_NOTIFICATION_CALLBACK_TYPE  cbT
             return;
         }
 
-        while (totalBytesRead < bytesWritten)
-        {
-            // Read as many bytes as we know about.
-            ftStatus = FT_ReadPipe(notification->NotHandle, notification->endpoint, receiveBuffer+bytesRead ,
-                        notification->bytesToRead, &bytesRead,0);
-            if (FT_FAILED(ftStatus))
-            {
-                printf("%s:%d: ERROR: FT_ReadPipe failed %d (%s)\n",__FILE__,__LINE__, ftStatus, statusString(ftStatus));
-                return;
-            }
+	while (totalBytesRead < bytesWritten)
+	{
+	    ULONG currentBytesRead = 0; // Use a temporary variable for the current read
+	    // Read up to `bytesToRead` into the buffer, offsetting by the total bytes read so far.
+	    ftStatus = FT_ReadPipe(notification->NotHandle, notification->endpoint, receiveBuffer + totalBytesRead,
+	                            notification->bytesToRead, &currentBytesRead, 0);
 
-            printf("%s:%d: Read %u bytes.\n",__FILE__,__LINE__, (unsigned int)bytesRead);
-            totalBytesRead += bytesRead;
-        }
+	    if (FT_FAILED(ftStatus))
+	    {
+	        printf("%s:%d: ERROR: FT_ReadPipe failed %d (%s)\n", __FILE__, __LINE__, ftStatus, statusString(ftStatus));
+	        return;
+	    }
+    
+	    printf("%s:%d: Read %u bytes.\n", __FILE__, __LINE__, (unsigned int)currentBytesRead);
+	    totalBytesRead += currentBytesRead;
+	}
+
     }
     else
     {
         // Only callback types are _DATA 
         assert(cbType == E_FT_NOTIFICATION_CALLBACK_TYPE_GPIO);
     }
+    printf("%s:%d: ................END\n",__FUNCTION__,__LINE__);
 }
 
 
@@ -290,86 +297,88 @@ static VOID notificationCb(void *cbContext, E_FT_NOTIFICATION_CALLBACK_TYPE  cbT
  */
 static FT_STATUS loopbackNotify(UCHAR endpoint)
 {
-    FT_STATUS       ftStatus = FT_OK;
-    FT_HANDLE       ftHandle;
-    MyNotification  notification;
+    FT_STATUS ftStatus = FT_OK;
 
-    assert(endpoint >=2 && endpoint <= 5);
-    ftStatus = FT_Create(0,FT_OPEN_BY_INDEX, &ftHandle);
-    if (FT_FAILED(ftStatus))
+    assert(endpoint >= 2 && endpoint <= 5);
+
+    // ✅ Allocate MyNotification on heap to survive async callbacks
+    MyNotification *notification = calloc(1, sizeof(MyNotification));
+    if (!notification)
     {
-        printf("%s:%d: ERROR: FT_Create failed (%s)\n",__FILE__,__LINE__,statusString(ftStatus));
-        return ftStatus;
+        printf("%s:%d: ERROR: Failed to allocate notification structure.\n", __FILE__, __LINE__);
+        return FT_INSUFFICIENT_RESOURCES;
     }
 
-    notification.event = FT_W32_CreateEvent(
-                             NULL,  // no security attributes
-                             FALSE, // FALSE = auto-reset
-                             FALSE, // FALSE = initially not signalled
-                             NULL); // no name
-    if (NULL == notification.event)
+    notification->event = FT_W32_CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (!notification->event)
     {
-        printf("%s:%d: ERROR: Failed to create 'transfer complete' event.\n",__FILE__,__LINE__);
-        ftStatus = FT_INSUFFICIENT_RESOURCES;
-        goto exit;
-    }
-
-    notification.NotHandle = ftHandle;
-    // Nominate our function to be called when FT60x receives data.
-    ftStatus = FT_SetNotificationCallback(ftHandle,notificationCb,&notification);
-    if (FT_FAILED(ftStatus))
-    {
-        printf("%s:%d: ERROR: FT_SetNotificationCallback failed (%s)\n",__FILE__,__LINE__, statusString(ftStatus));
-        goto exit;
-    }
-
-    printf("%s:%d: Writing %u bytes to endpoint 0x%02X.\n",__FILE__,__LINE__, 
-                    BYTES_WRITE,(unsigned int)(endpoint | HOST_TO_DEVICE));
-
-    // Write data to the OUT endpoint.  When the FPGA loopback returns that
-    // data to the corresponding IN endpoint, D3XX will invoke notificationCb.
-    ftStatus = FT_WritePipe(ftHandle,endpoint | HOST_TO_DEVICE,(UCHAR *)message,
-                            BYTES_WRITE, &bytesWritten,0); // NULL == block until complete.
-    if (FT_FAILED(ftStatus))
-    {
-        printf("%s:%d: ERROR: FT_WritePipe failed (%s)\n",__FILE__,__LINE__,statusString(ftStatus));
-        FT_ClearNotificationCallback(ftHandle);
-        FT_Close(ftHandle);
-        return ftStatus;
-    }
-
-    // Wait for notificationCb to tell us that data have been received.
-    DWORD waitResult = FT_W32_WaitForSingleObject(notification.event,SIGNAL_TIMEOUT); 
-    if (WAIT_FAILED == waitResult)
-    {
-        printf("%s:%d: ERROR Wait failed.\n",__FILE__,__LINE__);
+        printf("%s:%d: ERROR: Failed to create event.\n", __FILE__, __LINE__);
         ftStatus = FT_NO_SYSTEM_RESOURCES;
-        goto exit;
+        goto cleanup;
     }
-    sleep(10);
-    if (waitResult == WAIT_TIMEOUT)
+
+    if (((Event *)notification->event)->signature != EVENT_SIGNATURE)
     {
-        printf("%s:%d: ERROR: Wait timed out.\n\n",__FILE__,__LINE__);
+        printf("%s:%d: ERROR: Invalid event signature.\n", __FILE__, __LINE__);
+        ftStatus = FT_NO_SYSTEM_RESOURCES;
+        goto cleanup;
+    }
+
+    notification->NotHandle = gftHandle;
+
+    ftStatus = FT_SetNotificationCallback(gftHandle, notificationCb, notification);
+    if (FT_FAILED(ftStatus))
+    {
+        printf("%s:%d: ERROR: FT_SetNotificationCallback failed (%s)\n", __FILE__, __LINE__, statusString(ftStatus));
+        goto cleanup;
+    }
+
+    printf("%s:%d: Writing %u bytes to endpoint 0x%02X.\n", __FILE__, __LINE__,
+           BYTES_WRITE, (unsigned int)(endpoint | HOST_TO_DEVICE));
+
+    ftStatus = FT_WritePipe(gftHandle, endpoint | HOST_TO_DEVICE,
+                            (UCHAR *)message, BYTES_WRITE, &bytesWritten, 0);
+    if (FT_FAILED(ftStatus))
+    {
+        printf("%s:%d: ERROR: FT_WritePipe failed (%s)\n", __FILE__, __LINE__, statusString(ftStatus));
+        goto cleanup;
+    }
+
+    DWORD waitResult = FT_W32_WaitForSingleObject(notification->event, SIGNAL_TIMEOUT);
+    if (waitResult == WAIT_FAILED)
+    {
+        printf("%s:%d: ERROR: Wait failed.\n", __FILE__, __LINE__);
+        ftStatus = FT_NO_SYSTEM_RESOURCES;
+        goto cleanup;
+    }
+    else if (waitResult == WAIT_TIMEOUT)
+    {
+        printf("%s:%d: ERROR: Wait timed out.\n", __FILE__, __LINE__);
         ftStatus = FT_TIMEOUT;
-        goto exit;
+        goto cleanup;
     }
 
     assert(waitResult == WAIT_OBJECT_0);
+    printf("%s:%d: Wrote %u bytes, read %u bytes.\n", __FILE__, __LINE__, bytesWritten, totalBytesRead);
 
-    printf("%s:%d: Wrote %d bytes, read %d bytes.\n",__FILE__,__LINE__,(int)bytesWritten,(int)totalBytesRead);
+cleanup:
+    FT_ClearNotificationCallback(gftHandle);
 
-exit:
-    FT_ClearNotificationCallback(ftHandle);
-    FT_Close(ftHandle);
-    if (notification.event)
+    if (notification)
     {
-        FT_W32_CloseHandle(notification.event);
-    }
+        if (notification->event)
+            FT_W32_CloseHandle(notification->event);
 
-    DisableNotifications();
-   
+        free(notification);
+    }
+    if(gftHandle != NULL){
+        FT_Close(gftHandle);
+    }
+    ftStatus = DisableNotifications();
+    printf("%s:%d: ................END\n", __FUNCTION__, __LINE__);
     return ftStatus;
 }
+
 
 int main(void)
 {
@@ -382,10 +391,17 @@ int main(void)
     {
         return ftStatus;
     }
+    ftStatus = FT_Create((PVOID)"FTDI SuperSpeed-FIFO Bridge", FT_OPEN_BY_DESCRIPTION, &gftHandle);
+    if (FT_FAILED(ftStatus))
+    {
+        printf("%s:%d: ERROR: FT_Create failed (%s)\n",__FILE__,__LINE__,statusString(ftStatus));
+        return ftStatus;
+    }
     ftStatus = loopbackNotify((UCHAR)2);
     if (FT_FAILED(ftStatus))
     {
         return ftStatus;
     }
+    printf("%s:%d: ................END\n",__FUNCTION__,__LINE__);
     return 0;
 }

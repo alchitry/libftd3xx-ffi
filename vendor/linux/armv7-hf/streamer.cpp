@@ -51,39 +51,6 @@ static void show_help(const char *bin)
 	printf("  mode: 0 = FT245 mode (default), 1 = FT600 mode\r\n");
 }
 
-#if 0
-static void get_queue_status(HANDLE handle)
-{
-	for (uint8_t channel = 0; channel < out_ch_cnt; channel++) {
-		DWORD dwBufferred;
-
-		if (FT_OK != FT_GetUnsentBuffer(handle, channel,
-					NULL, &dwBufferred)) {
-			printf("Failed to get unsent buffer size\r\n");
-			continue;
-		}
-		unique_ptr<uint8_t[]> p(new uint8_t[dwBufferred]);
-
-		printf("CH%d OUT unsent buffer size in queue:%u\r\n",
-				channel, dwBufferred);
-		if (FT_OK != FT_GetUnsentBuffer(handle, channel,
-					p.get(), &dwBufferred)) {
-			printf("Failed to read unsent buffer size\r\n");
-			continue;
-		}
-	}
-
-	for (uint8_t channel = 0; channel < in_ch_cnt; channel++) {
-		DWORD dwBufferred;
-
-		if (FT_OK != FT_GetReadQueueStatus(handle, channel, &dwBufferred))
-			continue;
-		printf("CH%d IN unread buffer size in queue:%u\r\n",
-				channel, dwBufferred);
-	}
-}
-#endif
-
 static bool validate_arguments(int argc, char *argv[])
 {
 	if (argc != 3 && argc != 4)
@@ -109,7 +76,7 @@ static bool validate_arguments(int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
-
+	FT_STATUS ftStatus = FT_OK;
 	get_version();
 
 	if (!validate_arguments(argc, argv)) {
@@ -130,6 +97,17 @@ int main(int argc, char *argv[])
 		printf("Failed to create device\r\n");
 		return -1;
 	}
+
+	FT_SetPipeTimeout(handle,0x02,0);
+    FT_SetPipeTimeout(handle,0x82,0);
+	
+    ftStatus = FT_SetStreamPipe(handle, TRUE, TRUE, 0, 1024*1024);
+    if (FT_FAILED(ftStatus))
+    {
+        printf("FT_SetStreamPipe failed!=%d\n",ftStatus);
+        goto _Exit;
+    }
+
 	if (out_ch_cnt)
 		write_thread = thread(write_test, handle);
 	if (in_ch_cnt)
@@ -145,6 +123,10 @@ int main(int argc, char *argv[])
 		measure_thread.join();
 	//get_queue_status(handle);
 
+	_Exit:
+	// Stop stream transfer
+    FT_ClearStreamPipe(handle, FALSE, FALSE, 0x02);
+    FT_ClearStreamPipe(handle, FALSE, FALSE, 0x82);
 	FT_Close(handle);
 	return 0;
 }

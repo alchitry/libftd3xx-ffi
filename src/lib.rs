@@ -71,20 +71,11 @@ macro_rules! create_ft_status_tryfrom {
                     x if x == FT_Status::FT_FAILED_TO_WRITE_DEVICE as $t => {
                         Ok(FT_Status::FT_FAILED_TO_WRITE_DEVICE)
                     }
-                    x if x == FT_Status::FT_EEPROM_READ_FAILED as $t => {
-                        Ok(FT_Status::FT_EEPROM_READ_FAILED)
+                    x if x == FT_Status::FT_MEM_INSUFFICIENT_ERROR as $t => {
+                        Ok(FT_Status::FT_MEM_INSUFFICIENT_ERROR)
                     }
-                    x if x == FT_Status::FT_EEPROM_WRITE_FAILED as $t => {
-                        Ok(FT_Status::FT_EEPROM_WRITE_FAILED)
-                    }
-                    x if x == FT_Status::FT_EEPROM_ERASE_FAILED as $t => {
-                        Ok(FT_Status::FT_EEPROM_ERASE_FAILED)
-                    }
-                    x if x == FT_Status::FT_EEPROM_NOT_PRESENT as $t => {
-                        Ok(FT_Status::FT_EEPROM_NOT_PRESENT)
-                    }
-                    x if x == FT_Status::FT_EEPROM_NOT_PROGRAMMED as $t => {
-                        Ok(FT_Status::FT_EEPROM_NOT_PROGRAMMED)
+                    x if x == FT_Status::FT_OVERFLOW_ERROR as $t => {
+                        Ok(FT_Status::FT_OVERFLOW_ERROR)
                     }
                     x if x == FT_Status::FT_INVALID_ARGS as $t => Ok(FT_Status::FT_INVALID_ARGS),
                     x if x == FT_Status::FT_NOT_SUPPORTED as $t => Ok(FT_Status::FT_NOT_SUPPORTED),

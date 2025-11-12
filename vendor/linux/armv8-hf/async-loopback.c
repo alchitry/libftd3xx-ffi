@@ -7,8 +7,8 @@
 #include <pthread.h>
 #include "ftd3xx.h"
 
-#define MULTI_ASYNC_BUFFER_SIZE    1048576 //32768  // 8388608 //   
-#define MULTI_ASYNC_NUM             8          
+#define MULTI_ASYNC_BUFFER_SIZE    32768 //1048576 //32768  // 8388608 //   
+#define MULTI_ASYNC_NUM             128         
 #define NUM_ITERATIONS              1
 
 pthread_t   writeThread;
@@ -31,6 +31,7 @@ FT_HANDLE ftHandle;
 static void* asyncRead(void *arg)
 {
     int i,j;
+    (void)arg;
     FT_STATUS ftStatus = FT_OK;
     BOOL bResult = TRUE;
     UCHAR *acReadBuf = calloc(MULTI_ASYNC_NUM * MULTI_ASYNC_BUFFER_SIZE, sizeof(UCHAR));
@@ -74,7 +75,7 @@ static void* asyncRead(void *arg)
                     bResult = FALSE;
                     goto exit;
                 }
-                #if 1
+
                 ftStatus = FT_GetOverlappedResult(ftHandle, &vOverlappedRead[j], &ulBytesRead[j], TRUE);
                 if (FT_FAILED(ftStatus))
                 {
@@ -86,33 +87,12 @@ static void* asyncRead(void *arg)
                     //printf("FT_GetOverlappedResult failed! ulBytesRead[j=%d]=%d != %d ulBytesToRead  \n",j,ulBytesRead[j],ulBytesToRead);
                     goto exit;
                 }
-                #endif
-            }
-           #if 0
-            /* Wait for the asynchronous read transfer request to finish*/
-            for (j=0; j<MULTI_ASYNC_NUM; j++)
-            {
-                ftStatus = FT_GetOverlappedResult(ftHandle, &vOverlappedRead[j], &ulBytesRead[j], TRUE);
-                if (FT_FAILED(ftStatus))
+                else
                 {
-                    if (ftStatus == FT_IO_INCOMPLETE)
-                    {
-                        sleep(1);
-                        continue;
-                    }
-                    ftStatus = FT_AbortPipe(ftHandle, 0x02);
-                    printf("Read -> FT_AbortPipe return =%d  \n",ftStatus);
-                    bResult = FALSE;
-                    goto exit;
+                    printf("FT_GetOverlappedResult ulBytesRead[j=%d]=%d == %d ulBytesToRead  \n",j,ulBytesRead[j],ulBytesToRead);
                 }
-                if (ulBytesRead[j] != ulBytesToRead)
-                {
-                    printf("FT_GetOverlappedResult >> ulBytesRead[j=%d]=%d != %d ulBytesToRead  \n",j,ulBytesRead[j],ulBytesToRead);
-                    continue;
-                }
-                break;
+
             }
-           #endif
         }
         exit:
         if(bResult == FALSE)
@@ -135,6 +115,7 @@ static void* asyncRead(void *arg)
 static void* asyncWrite(void *arg)
 {
     int i,j;
+    (void)arg;
     FT_STATUS ftStatus = FT_OK;
     BOOL bResult = TRUE;
     UCHAR *acWriteBuf = calloc(MULTI_ASYNC_NUM * MULTI_ASYNC_BUFFER_SIZE, sizeof(UCHAR));
@@ -198,6 +179,11 @@ static void* asyncWrite(void *arg)
                     bResult = FALSE;
                     goto exit;  
                 }
+                else
+                {
+                    printf("FT_GetOverlappedResult >> ulBytesWritten[j=%d]=%d == %d ulBytesToWrite\n",j,ulBytesWritten[j],ulBytesToWrite);
+
+                }
             }
         }
         exit:
@@ -229,27 +215,21 @@ int main(void)
                    FT_OPEN_BY_DESCRIPTION, &ftHandle);
     if (FT_FAILED(ftStatus))
     {
-        printf("FT_Create failed!\n");
-        goto exit;
-    }
-    ftStatus = FT_SetStreamPipe(ftHandle, FALSE, FALSE, 0x02, ulBytesToWrite);
-    if (FT_FAILED(ftStatus))
-    {
-        printf("0x02 --> FT_SetStreamPipe failed!\n");
-        bResult = FALSE;
-        goto exit;
-    }
-    ftStatus = FT_SetStreamPipe(ftHandle, FALSE, FALSE, 0x82, ulBytesToRead);
-    if (FT_FAILED(ftStatus))
-    {
-        printf("0x82 --> FT_SetStreamPipe failed!\n");
-        bResult = FALSE;
+        printf("FT_Create failed!=%d\n",ftStatus);
         goto exit;
     }
 
     FT_SetPipeTimeout(ftHandle,0x02,0);
     FT_SetPipeTimeout(ftHandle,0x82,0);
-    
+       // Start thread to write bytes
+    r = pthread_create(&writeThread, NULL, &asyncWrite, NULL);
+    if (r != 0)
+    {
+        printf("Failed to create write thread (%d)\n", r);
+        goto exit;
+    }
+    writerRunning = 1;
+
     // Start thread to read bytes
     r = pthread_create(&readThread, NULL, &asyncRead,NULL);
     if (r != 0)
@@ -259,21 +239,11 @@ int main(void)
     }
     readerRunning = 1;
 
-   // Start thread to write bytes
-    r = pthread_create(&writeThread, NULL, &asyncWrite, NULL);
-    if (r != 0)
-    {
-        printf("Failed to create write thread (%d)\n", r);
-        goto exit;
-    }
-    writerRunning = 1;
-
-    (void)pthread_join(readThread, NULL);
-    readerRunning = 0;
-
     // Wait for threads to finish
     (void)pthread_join(writeThread, NULL);
     writerRunning = 0;
+    (void)pthread_join(readThread, NULL);
+    readerRunning = 0;
     
 exit:
     if (readerRunning)
@@ -290,15 +260,11 @@ exit:
     /*Close device*/
     FT_Close(ftHandle);
 
-    /*Stop stream transfer*/
-    FT_ClearStreamPipe(ftHandle, FALSE, FALSE, 0x02);
-    FT_ClearStreamPipe(ftHandle, FALSE, FALSE, 0x82);
-
     if(acReadBuf != NULL)
         free(acReadBuf);
 
     if(acWriteBuf != NULL)
         free(acWriteBuf);
     
-    return 0;
+    return bResult;
 }

@@ -22,6 +22,9 @@ static void show_help(const char *bin)
 int main(int argc, char *argv[])
 {
 	FT_HANDLE handle = NULL;
+    unsigned short vendorId;
+    unsigned short productId;
+
 
 	if (argc != 3) {
 		show_help(argv[0]);
@@ -37,6 +40,16 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 	printf("Device created\r\n");
+
+
+    FT_STATUS ftStatus = FT_GetVIDPID(handle,&vendorId,&productId);
+    if (ftStatus != FT_OK)
+    {
+        (void)printf("FT_GetVIDPID failed %d\n",ftStatus);
+    }
+    (void)printf("\tVendor ID: 0x%04X\n\tProduct ID: 0x%04X\n",vendorId, productId);
+
+
 	
     FT_SetPipeTimeout(handle,0x02,0);
     FT_SetPipeTimeout(handle,0x82,0);
